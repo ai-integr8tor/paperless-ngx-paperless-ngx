@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from numpy import ndarray
+    from sklearn.neural_network import MLPClassifier
 
 from django.conf import settings
 from django.core.cache import cache
@@ -123,7 +124,8 @@ class DocumentClassifier:
     # v8 - Added storage path classifier
     # v9 - Changed from hashing to time/ids for re-train check
     # v10 - HMAC-signed model file
-    # v11 - Use sample_weight for balanced training; predict_proba with threshold
+    # v11 - Use sample_weight for balanced training; predict_proba with threshold;
+    #       drop training-only MLP state before saving
     FORMAT_VERSION = 11
 
     HMAC_SIZE = 32  # SHA-256 digest length
@@ -156,6 +158,20 @@ class DocumentClassifier:
         self.data_vectorizer_hash = sha256(
             pickle.dumps(self.data_vectorizer),
         ).hexdigest()
+
+    @staticmethod
+    def _strip_training_state(classifier: MLPClassifier) -> None:
+        """
+        Drop MLPClassifier state which is only used during fit(), never by predict().
+
+        The Adam optimizer keeps two moment arrays the size of the weights, and
+        without early_stopping _best_coefs/_best_intercepts are just a copy of the
+        initial random weights. Together that is 3x the size of the weights, which
+        would otherwise be pickled and loaded along with the model.
+        """
+        del classifier._optimizer
+        del classifier._best_coefs
+        del classifier._best_intercepts
 
     @staticmethod
     def _compute_hmac(data: bytes | memoryview) -> bytes:
@@ -405,6 +421,7 @@ class DocumentClassifier:
 
             self.tags_classifier = MLPClassifier(tol=0.01, random_state=0)
             self.tags_classifier.fit(data_vectorized, labels_tags_vectorized)
+            self._strip_training_state(self.tags_classifier)
         else:
             self.tags_classifier = None
             logger.debug("There are no tags. Not training tags classifier.")
@@ -420,6 +437,7 @@ class DocumentClassifier:
                 labels_correspondent,
                 sample_weight=compute_sample_weight("balanced", labels_correspondent),
             )
+            self._strip_training_state(self.correspondent_classifier)
         else:
             self.correspondent_classifier = None
             logger.debug(
@@ -437,6 +455,7 @@ class DocumentClassifier:
                 labels_document_type,
                 sample_weight=compute_sample_weight("balanced", labels_document_type),
             )
+            self._strip_training_state(self.document_type_classifier)
         else:
             self.document_type_classifier = None
             logger.debug(
@@ -454,6 +473,7 @@ class DocumentClassifier:
                 labels_storage_path,
                 sample_weight=compute_sample_weight("balanced", labels_storage_path),
             )
+            self._strip_training_state(self.storage_path_classifier)
         else:
             self.storage_path_classifier = None
             logger.debug(
